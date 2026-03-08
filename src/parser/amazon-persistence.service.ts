@@ -37,14 +37,16 @@ export class AmazonPersistenceService {
         },
       });
 
-      await this.saveProduct(tx, bundle);
+      const resolvedGroupId = await this.resolveCanonicalGroupId(tx, bundle);
+
+      await this.saveProduct(tx, bundle, resolvedGroupId);
 
       if (this.shouldCreateSnapshot(existingProduct, bundle.productSnapshot)) {
         await this.saveSnapshot(tx, bundle.productSnapshot);
       }
 
       await this.saveProductCategory(tx, bundle, category.id);
-      await this.saveReviews(tx, bundle.reviews);
+      await this.saveReviews(tx, bundle.reviews, resolvedGroupId);
     });
 
     this.logger.log(
@@ -71,13 +73,11 @@ export class AmazonPersistenceService {
               },
             }
           : undefined,
-      attributeSchemaJson: this.toCreateJsonValue(data.attributeSchemaJson),
     };
 
     const updateData: Prisma.CategoryUpdateInput = {
       name: data.name,
       url: data.url ?? null,
-      attributeSchemaJson: this.toUpdateJsonValue(data.attributeSchemaJson),
       lastSeenAt: now,
     };
 
@@ -140,6 +140,7 @@ export class AmazonPersistenceService {
   private async saveProduct(
     tx: Prisma.TransactionClient,
     bundle: PreparedSaveBundle,
+    groupId: string,
   ): Promise<void> {
     const now = new Date();
     const data = bundle.product;
@@ -153,7 +154,7 @@ export class AmazonPersistenceService {
         canonicalUrl: data.canonicalUrl,
         title: data.title,
         sellerId: data.sellerId,
-        variationGroupKey: data.variationGroupKey,
+        groupId,
         variationTheme: data.variationTheme,
         hasVariations: data.hasVariations,
         priceAmount: data.priceAmount,
@@ -165,13 +166,12 @@ export class AmazonPersistenceService {
         avgRating: data.avgRating,
         reviewsCount: data.reviewsCount,
         availabilityStatus: data.availabilityStatus,
-        attributesJson: this.toCreateJsonValue(data.attributesJson),
       },
       update: {
         canonicalUrl: data.canonicalUrl ?? undefined,
         title: data.title,
         sellerId: data.sellerId ?? undefined,
-        variationGroupKey: data.variationGroupKey ?? undefined,
+        groupId,
         variationTheme: data.variationTheme ?? undefined,
         hasVariations: data.hasVariations ? true : undefined,
         priceAmount: data.priceAmount ?? undefined,
@@ -185,10 +185,6 @@ export class AmazonPersistenceService {
         availabilityStatus:
           data.availabilityStatus !== 'UNKNOWN'
             ? data.availabilityStatus
-            : undefined,
-        attributesJson:
-          data.attributesJson != null
-            ? this.toUpdateJsonValue(data.attributesJson)
             : undefined,
         lastSeenAt: now,
       },
@@ -244,6 +240,7 @@ export class AmazonPersistenceService {
   private async saveReviews(
     tx: Prisma.TransactionClient,
     reviews: ReviewSavePayload[],
+    groupId: string,
   ): Promise<void> {
     if (reviews.length === 0) {
       return;
@@ -261,23 +258,22 @@ export class AmazonPersistenceService {
       select: {
         amazonReviewId: true,
         contentHash: true,
+        groupId: true,
       },
     });
 
     const existingMap = new Map(
-      existingReviews.map((review) => [
-        review.amazonReviewId,
-        review.contentHash,
-      ]),
+      existingReviews.map((review) => [review.amazonReviewId, review]),
     );
 
     for (const review of reviews) {
-      const existingContentHash = existingMap.get(review.amazonReviewId);
+      const existing = existingMap.get(review.amazonReviewId);
 
-      if (existingContentHash == null) {
+      if (!existing) {
         await tx.review.create({
           data: {
             amazonReviewId: review.amazonReviewId,
+            groupId,
             rating: review.rating,
             reviewCreatedAt: review.reviewCreatedAt,
             verifiedPurchase: review.verifiedPurchase,
@@ -285,41 +281,111 @@ export class AmazonPersistenceService {
             contentHash: review.contentHash,
           },
         });
-      } else if (existingContentHash !== review.contentHash) {
-        await tx.review.update({
-          where: {
-            amazonReviewId: review.amazonReviewId,
-          },
-          data: {
-            rating: review.rating,
-            reviewCreatedAt: review.reviewCreatedAt,
-            verifiedPurchase: review.verifiedPurchase,
-            helpfulVotes: review.helpfulVotes,
-            contentHash: review.contentHash,
-            lastSeenAt: now,
-            lastChangedAt: now,
-          },
-        });
+
+        continue;
       }
 
-      await tx.reviewProduct.upsert({
+      const changed =
+        existing.contentHash !== review.contentHash ||
+        existing.groupId !== groupId;
+
+      await tx.review.update({
         where: {
-          reviewAmazonReviewId_productAsin: {
-            reviewAmazonReviewId: review.amazonReviewId,
-            productAsin: review.productAsin,
-          },
+          amazonReviewId: review.amazonReviewId,
         },
-        create: {
-          reviewAmazonReviewId: review.amazonReviewId,
-          productAsin: review.productAsin,
-          isDeleted: false,
-        },
-        update: {
-          isDeleted: false,
+        data: {
+          groupId,
+          rating: review.rating,
+          reviewCreatedAt: review.reviewCreatedAt,
+          verifiedPurchase: review.verifiedPurchase,
+          helpfulVotes: review.helpfulVotes,
+          contentHash: review.contentHash,
           lastSeenAt: now,
+          lastChangedAt: changed ? now : undefined,
         },
       });
     }
+  }
+
+  private async resolveCanonicalGroupId(
+    tx: Prisma.TransactionClient,
+    bundle: PreparedSaveBundle,
+  ): Promise<string> {
+    const provisionalGroupId = bundle.product.groupId;
+
+    const candidateAsins = Array.from(
+      new Set(
+        [bundle.product.asin, ...bundle.raw.product.variationAsins]
+          .map((asin) => asin?.trim().toUpperCase())
+          .filter((asin): asin is string => Boolean(asin)),
+      ),
+    );
+
+    if (candidateAsins.length === 0) {
+      return provisionalGroupId;
+    }
+
+    const existingProducts = await tx.product.findMany({
+      where: {
+        asin: {
+          in: candidateAsins,
+        },
+      },
+      select: {
+        groupId: true,
+        firstSeenAt: true,
+      },
+      orderBy: {
+        firstSeenAt: 'asc',
+      },
+    });
+
+    const existingGroupIds = Array.from(
+      new Set(existingProducts.map((product) => product.groupId)),
+    );
+
+    const canonicalGroupId = existingGroupIds[0] ?? provisionalGroupId;
+    const groupIdsToMerge = existingGroupIds.filter(
+      (groupId) => groupId !== canonicalGroupId,
+    );
+
+    if (groupIdsToMerge.length > 0) {
+      await this.mergeGroupIds(tx, canonicalGroupId, groupIdsToMerge);
+    }
+
+    return canonicalGroupId;
+  }
+
+  private async mergeGroupIds(
+    tx: Prisma.TransactionClient,
+    canonicalGroupId: string,
+    groupIdsToMerge: string[],
+  ): Promise<void> {
+    if (groupIdsToMerge.length === 0) {
+      return;
+    }
+
+    await tx.product.updateMany({
+      where: {
+        groupId: {
+          in: groupIdsToMerge,
+        },
+      },
+      data: {
+        groupId: canonicalGroupId,
+      },
+    });
+
+    await tx.review.updateMany({
+      where: {
+        groupId: {
+          in: groupIdsToMerge,
+        },
+      },
+      data: {
+        groupId: canonicalGroupId,
+      },
+    });
   }
 
   private shouldCreateSnapshot(
@@ -380,25 +446,5 @@ export class AmazonPersistenceService {
     }
 
     return String(value);
-  }
-
-  private toCreateJsonValue(
-    value: Record<string, unknown> | null,
-  ): Prisma.InputJsonValue | undefined {
-    if (value == null) {
-      return undefined;
-    }
-
-    return value as Prisma.InputJsonValue;
-  }
-
-  private toUpdateJsonValue(
-    value: Record<string, unknown> | null,
-  ): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput | undefined {
-    if (value === null) {
-      return Prisma.JsonNull;
-    }
-
-    return value as Prisma.InputJsonValue;
   }
 }

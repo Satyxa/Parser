@@ -20,22 +20,27 @@ export class AmazonReviewParserService {
 
   async parseReviews(
     asin: string,
+    groupId: string,
+    variationAsins: string[],
     productUrl: string,
     referer: string,
     productHtml: string,
   ): Promise<ParsedReview[]> {
     const seen = new Map<string, ParsedReview>();
-    const origin = new URL(productUrl).origin;
+    const resolvedGroupId = await this.resolveCanonicalGroupId(
+      groupId,
+      asin,
+      variationAsins,
+    );
 
-    for (let page = 1; page <= this.maxReviewPages; page++) {
-      const reviewUrl =
-        `${origin}/product-reviews/${asin}/` +
-        `?ie=UTF8&reviewerType=all_reviews&sortBy=recent&pageNumber=${page}`;
+    let page = 1;
+    let nextPageUrl = this.buildInitialReviewUrl(asin, productUrl, productHtml);
 
+    while (nextPageUrl && page <= this.maxReviewPages) {
       let html: string;
 
       try {
-        html = await this.http.getHtml(reviewUrl, referer);
+        html = await this.http.getHtml(nextPageUrl, referer);
       } catch (error) {
         this.logger.warn(
           `Reviews page failed for ASIN ${asin}, page ${page}: ${
@@ -60,7 +65,7 @@ export class AmazonReviewParserService {
       }
 
       const pageIsAlreadyIndexed = await this.isReviewPageAlreadyIndexed(
-        asin,
+        resolvedGroupId,
         reviews,
       );
 
@@ -71,13 +76,8 @@ export class AmazonReviewParserService {
         break;
       }
 
-      const $ = cheerio.load(html);
-      const hasNextPage =
-        $('.a-pagination .a-last a').length > 0 || $('li.a-last a').length > 0;
-
-      if (!hasNextPage) {
-        break;
-      }
+      nextPageUrl = this.extractNextReviewPageUrl(html, nextPageUrl)!;
+      page += 1;
     }
 
     if (seen.size > 0) {
@@ -93,39 +93,126 @@ export class AmazonReviewParserService {
     return embeddedReviews;
   }
 
+  private buildInitialReviewUrl(
+    asin: string,
+    productUrl: string,
+    productHtml: string,
+  ): string {
+    const $ = cheerio.load(productHtml);
+
+    const href =
+      H.firstNonEmpty(
+        $('#acrCustomerReviewLink').attr('href'),
+        $('[data-hook="see-all-reviews-link-foot"]').attr('href'),
+        $('#reviews-medley-footer a').attr('href'),
+        $('a[href*="/product-reviews/"]').first().attr('href'),
+      ) ?? null;
+
+    const baseUrl = new URL(productUrl).origin;
+
+    if (href) {
+      const absolute = H.toAbsoluteUrl(href, baseUrl);
+      if (absolute) {
+        const url = new URL(absolute);
+        url.searchParams.set('reviewerType', 'all_reviews');
+        url.searchParams.set('sortBy', 'recent');
+        if (!url.searchParams.get('pageNumber')) {
+          url.searchParams.set('pageNumber', '1');
+        }
+
+        return url.toString();
+      }
+    }
+
+    return (
+      `${baseUrl}/product-reviews/${asin}/` +
+      `?ie=UTF8&reviewerType=all_reviews&sortBy=recent&pageNumber=1`
+    );
+  }
+
+  private extractNextReviewPageUrl(
+    html: string,
+    currentUrl: string,
+  ): string | null {
+    const $ = cheerio.load(html);
+
+    const href =
+      H.firstNonEmpty(
+        $('.a-pagination .a-last a').attr('href'),
+        $('li.a-last a').attr('href'),
+      ) ?? null;
+
+    if (!href) {
+      return null;
+    }
+
+    return H.toAbsoluteUrl(href, currentUrl);
+  }
+
+  private async resolveCanonicalGroupId(
+    provisionalGroupId: string,
+    asin: string,
+    variationAsins: string[],
+  ): Promise<string> {
+    const candidateAsins = Array.from(
+      new Set(
+        [asin, ...variationAsins]
+          .map((value) => H.normalizeAsin(value))
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+
+    if (candidateAsins.length === 0) {
+      return provisionalGroupId;
+    }
+
+    const existingProducts = await this.prisma.product.findMany({
+      where: {
+        asin: {
+          in: candidateAsins,
+        },
+      },
+      select: {
+        groupId: true,
+        firstSeenAt: true,
+      },
+      orderBy: {
+        firstSeenAt: 'asc',
+      },
+    });
+
+    return existingProducts[0]?.groupId ?? provisionalGroupId;
+  }
+
   private async isReviewPageAlreadyIndexed(
-    productAsin: string,
+    groupId: string,
     reviews: ParsedReview[],
   ): Promise<boolean> {
     if (reviews.length === 0) {
       return false;
     }
 
-    const existingLinks = await this.prisma.reviewProduct.findMany({
+    const existingReviews = await this.prisma.review.findMany({
       where: {
-        productAsin,
-        reviewAmazonReviewId: {
+        groupId,
+        amazonReviewId: {
           in: reviews.map((review) => review.amazonReviewId),
         },
       },
       select: {
-        reviewAmazonReviewId: true,
-        review: {
-          select: {
-            contentHash: true,
-          },
-        },
+        amazonReviewId: true,
+        contentHash: true,
       },
     });
 
-    if (existingLinks.length !== reviews.length) {
+    if (existingReviews.length !== reviews.length) {
       return false;
     }
 
     const existingMap = new Map(
-      existingLinks.map((item) => [
-        item.reviewAmazonReviewId,
-        item.review.contentHash,
+      existingReviews.map((review) => [
+        review.amazonReviewId,
+        review.contentHash,
       ]),
     );
 

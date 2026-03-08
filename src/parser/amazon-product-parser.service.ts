@@ -87,18 +87,10 @@ export class AmazonProductParserService {
       : (merchantSeller ?? authorSeller);
 
     const pricing = this.extractPricing($, productJsonLd);
-    const variationGroupKey = this.extractVariationGroupKey(productHtml, $);
     const variationTheme = this.extractVariationTheme(productHtml, $);
-    const variationAsins = this.extractVariationAsins(
-      $,
-      asin,
-      variationGroupKey,
-    );
-
-    const hasVariations =
-      Boolean(variationTheme) ||
-      Boolean(variationGroupKey) ||
-      variationAsins.length > 1;
+    const variationAsins = this.extractVariationAsins($, asin);
+    const hasVariations = Boolean(variationTheme) || variationAsins.length > 1;
+    const groupId = this.buildGroupId(asin, variationAsins);
 
     const avgRatingText =
       H.firstNonEmpty(
@@ -122,45 +114,19 @@ export class AmazonProductParserService {
 
     const media = this.extractMedia($, productJsonLd);
 
-    const selectedVariations = this.extractSelectedVariations($);
-    const details = this.extractProductDetails($);
-    const features = this.extractFeatureBullets($);
-
-    const description =
-      H.firstNonEmpty(
-        features.join(' | '),
-        $('#bookDescription_feature_div').text(),
-        $('#productDescription').text(),
-        H.getJsonLdString(productJsonLd?.description),
-      ) ?? null;
-
     const reviews = await this.reviewParser.parseReviews(
       asin,
+      groupId,
+      variationAsins,
       seed.url,
       seed.sourceUrl,
       productHtml,
     );
 
-    const attributesJson = this.buildAttributesJson({
-      breadcrumbs,
-      media,
-      features,
-      details,
-      selectedVariations,
-      description,
-      sellerType: seller?.type ?? null,
-      sellerLabel: seller?.label ?? null,
-      sellerUrl: seller?.url ?? null,
-      rawBylineText: bylineText,
-      rawMerchantText: merchantText,
-      couponText: pricing.couponText,
-      couponPercent: pricing.couponPercent,
-    });
-
     return {
       asin,
       canonicalUrl,
-      variationGroupKey,
+      groupId,
       variationAsins,
       title,
       seller,
@@ -184,21 +150,8 @@ export class AmazonProductParserService {
 
       breadcrumbs,
       media,
-      attributesJson,
       reviews,
     };
-  }
-
-  private isBookProduct(
-    breadcrumbs: string[],
-    bylineText: string | null,
-  ): boolean {
-    const breadcrumbValue = breadcrumbs.join(' ').toLowerCase();
-
-    return (
-      breadcrumbValue.includes('books') ||
-      /\((author|authors?|editor|illustrator)\)/i.test(bylineText ?? '')
-    );
   }
 
   private extractProductJsonLd(
@@ -416,6 +369,18 @@ export class AmazonProductParserService {
     };
   }
 
+  private isBookProduct(
+    breadcrumbs: string[],
+    bylineText: string | null,
+  ): boolean {
+    const breadcrumbValue = breadcrumbs.join(' ').toLowerCase();
+
+    return (
+      breadcrumbValue.includes('books') ||
+      /\((author|authors?|editor|illustrator)\)/i.test(bylineText ?? '')
+    );
+  }
+
   private extractAuthorSeller(
     $: cheerio.CheerioAPI,
     productJsonLd: Record<string, any> | null,
@@ -555,30 +520,20 @@ export class AmazonProductParserService {
     return Array.from(media);
   }
 
-  private extractVariationGroupKey(
-    html: string,
-    $: cheerio.CheerioAPI,
-  ): string | null {
-    const candidates = [
-      $('#averageCustomerReviews').attr('data-parent-asin'),
-      $('#twister-plus-price-data-price').attr('data-parent-asin'),
-      $('#ASIN').attr('data-parent-asin'),
-      $('#parentAsin').attr('value'),
-      ...[
-        /"parentAsin"\s*:\s*"([A-Z0-9]{10})"/i,
-        /"parent_asin"\s*:\s*"([A-Z0-9]{10})"/i,
-        /data-parent-asin="([A-Z0-9]{10})"/i,
-      ].map((pattern) => html.match(pattern)?.[1] ?? null),
-    ];
+  private buildGroupId(currentAsin: string, variationAsins: string[]): string {
+    const normalized = Array.from(
+      new Set(
+        [currentAsin, ...variationAsins]
+          .map((asin) => H.normalizeAsin(asin))
+          .filter((asin): asin is string => Boolean(asin)),
+      ),
+    ).sort();
 
-    for (const candidate of candidates) {
-      const asin = H.normalizeAsin(candidate);
-      if (asin) {
-        return asin;
-      }
+    if (normalized.length <= 1) {
+      return currentAsin;
     }
 
-    return null;
+    return H.sha256(normalized.join('|'));
   }
 
   private extractVariationTheme(
@@ -619,7 +574,6 @@ export class AmazonProductParserService {
   private extractVariationAsins(
     $: cheerio.CheerioAPI,
     currentAsin: string,
-    variationGroupKey: string | null,
   ): string[] {
     const asins = new Set<string>();
 
@@ -637,14 +591,13 @@ export class AmazonProductParserService {
     };
 
     add(currentAsin);
-    add(variationGroupKey);
 
     const variationScope = $(
       '#twister, #twisterContainer, [id^="variation_"], [id^="inline-twister-expander-content-"]',
     );
 
     if (variationScope.length === 0) {
-      return Array.from(asins);
+      return Array.from(asins).sort();
     }
 
     variationScope
@@ -670,154 +623,6 @@ export class AmazonProductParserService {
         add(H.extractAsinFromUrl(node.attr('href') ?? ''));
       });
 
-    return Array.from(asins);
-  }
-
-  private extractSelectedVariations(
-    $: cheerio.CheerioAPI,
-  ): Record<string, string> {
-    const result: Record<string, string> = {};
-
-    $('[id^="variation_"][id$="_name"]').each((_, el) => {
-      const node = $(el);
-      const fallbackKey =
-        node
-          .attr('id')
-          ?.replace(/^variation_/, '')
-          .replace(/_name$/, '') ?? 'variation';
-
-      const key =
-        H.clean(node.find('.a-form-label').first().text()) ??
-        H.clean(fallbackKey);
-
-      const value =
-        H.firstNonEmpty(
-          node.find('.selection').first().text(),
-          node.find('.a-dropdown-prompt').first().text(),
-        ) ?? null;
-
-      if (key && value) {
-        result[key] = value;
-      }
-    });
-
-    return result;
-  }
-
-  private extractProductDetails($: cheerio.CheerioAPI): Record<string, string> {
-    const result: Record<string, string> = {};
-
-    $('#productDetails_detailBullets_sections1 tr, #prodDetails tr').each(
-      (_, el) => {
-        const row = $(el);
-        const key =
-          H.firstNonEmpty(
-            row.find('th').first().text(),
-            row.find('td.label').first().text(),
-          ) ?? null;
-
-        const value =
-          H.firstNonEmpty(
-            row.find('td').last().text(),
-            row.find('td.value').first().text(),
-          ) ?? null;
-
-        if (key && value) {
-          result[key] = value;
-        }
-      },
-    );
-
-    $('#detailBullets_feature_div li').each((_, el) => {
-      const text = H.clean($(el).text());
-      if (!text || !text.includes(':')) {
-        return;
-      }
-
-      const [rawKey, ...rest] = text.split(':');
-      const key = H.clean(rawKey);
-      const value = H.clean(rest.join(':'));
-
-      if (key && value) {
-        result[key] = value;
-      }
-    });
-
-    return result;
-  }
-
-  private extractFeatureBullets($: cheerio.CheerioAPI): string[] {
-    return H.dedupeStrings(
-      $('#feature-bullets ul li span')
-        .map((_, el) => H.clean($(el).text()))
-        .get(),
-    );
-  }
-
-  private buildAttributesJson(input: {
-    breadcrumbs: string[];
-    media: string[];
-    features: string[];
-    details: Record<string, string>;
-    selectedVariations: Record<string, string>;
-    description: string | null;
-    sellerType: SellerType | null;
-    sellerLabel: string | null;
-    sellerUrl: string | null;
-    rawBylineText: string | null;
-    rawMerchantText: string | null;
-    couponText: string | null;
-    couponPercent: number | null;
-  }): Record<string, unknown> | null {
-    const payload: Record<string, unknown> = {};
-
-    if (input.breadcrumbs.length > 0) {
-      payload.breadcrumbs = input.breadcrumbs;
-    }
-
-    if (input.media.length > 0) {
-      payload.media = input.media;
-    }
-
-    if (input.features.length > 0) {
-      payload.features = input.features;
-    }
-
-    if (Object.keys(input.details).length > 0) {
-      payload.details = input.details;
-    }
-
-    if (Object.keys(input.selectedVariations).length > 0) {
-      payload.selectedVariations = input.selectedVariations;
-    }
-
-    if (input.description) {
-      payload.description = input.description;
-    }
-
-    const sellerMeta: Record<string, unknown> = {};
-    if (input.sellerType) sellerMeta.type = input.sellerType;
-    if (input.sellerLabel) sellerMeta.label = input.sellerLabel;
-    if (input.sellerUrl) sellerMeta.url = input.sellerUrl;
-    if (Object.keys(sellerMeta).length > 0) {
-      payload.seller = sellerMeta;
-    }
-
-    const rawTexts: Record<string, string> = {};
-    if (input.rawBylineText) rawTexts.bylineText = input.rawBylineText;
-    if (input.rawMerchantText) rawTexts.merchantText = input.rawMerchantText;
-    if (Object.keys(rawTexts).length > 0) {
-      payload.rawTexts = rawTexts;
-    }
-
-    const pricing: Record<string, unknown> = {};
-    if (input.couponText) pricing.couponText = input.couponText;
-    if (input.couponPercent != null)
-      pricing.couponPercent = input.couponPercent;
-    if (Object.keys(pricing).length > 0) {
-      payload.pricing = pricing;
-    }
-
-    return Object.keys(payload).length > 0 ? payload : null;
+    return Array.from(asins).sort();
   }
 }

@@ -129,7 +129,7 @@ export class AmazonParserService implements OnApplicationBootstrap {
       }
 
       this.logger.log(
-        `Parsed product ${parsedProduct.asin}: title="${parsedProduct.title}", reviews=${parsedProduct.reviews.length}, price=${parsedProduct.priceAmount ?? 'null'}, avgRating=${parsedProduct.avgRating ?? 'null'}, variationGroupKey=${parsedProduct.variationGroupKey ?? 'null'}, variationAsins=${parsedProduct.variationAsins.length}`,
+        `Parsed product ${parsedProduct.asin}: title="${parsedProduct.title}", reviews=${parsedProduct.reviews.length}, price=${parsedProduct.priceAmount ?? 'null'}, avgRating=${parsedProduct.avgRating ?? 'null'}, groupId=${parsedProduct.groupId}, variationAsins=${parsedProduct.variationAsins.length}`,
       );
 
       const bundle = this.savePlanFactory.build(category, parsedProduct);

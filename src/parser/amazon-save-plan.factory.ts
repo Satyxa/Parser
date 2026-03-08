@@ -14,7 +14,6 @@ export class AmazonSavePlanFactory {
         name: category.name,
         url: category.url,
         parentId: null,
-        attributeSchemaJson: null,
       },
 
       seller: product.seller
@@ -32,7 +31,7 @@ export class AmazonSavePlanFactory {
         title: product.title,
         sellerId: product.seller?.id ?? null,
 
-        variationGroupKey: product.variationGroupKey,
+        groupId: product.groupId,
         variationTheme: product.variationTheme,
         hasVariations: product.hasVariations,
 
@@ -46,7 +45,6 @@ export class AmazonSavePlanFactory {
         avgRating: product.avgRating,
         reviewsCount: product.reviewsCount,
         availabilityStatus: product.availabilityStatus,
-        attributesJson: product.attributesJson,
       },
 
       productSnapshot: {
@@ -73,7 +71,7 @@ export class AmazonSavePlanFactory {
       },
 
       reviews: product.reviews.map((review) => ({
-        productAsin: product.asin,
+        groupId: product.groupId,
         amazonReviewId: review.amazonReviewId,
         rating: review.rating,
         reviewCreatedAt: review.reviewCreatedAt,

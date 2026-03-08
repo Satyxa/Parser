@@ -48,7 +48,7 @@ export interface ParsedReview {
 export interface ParsedProduct {
   asin: string;
   canonicalUrl: string | null;
-  variationGroupKey: string | null;
+  groupId: string;
   variationAsins: string[];
   title: string;
   seller: ParsedSeller | null;
@@ -68,7 +68,6 @@ export interface ParsedProduct {
 
   breadcrumbs: string[];
   media: string[];
-  attributesJson: Record<string, unknown> | null;
   reviews: ParsedReview[];
 }
 
@@ -82,7 +81,6 @@ export interface CategorySavePayload {
   name: string;
   url: string | null;
   parentId: bigint | null;
-  attributeSchemaJson: Record<string, unknown> | null;
 }
 
 export interface SellerSavePayload {
@@ -98,7 +96,7 @@ export interface ProductSavePayload {
   title: string;
   sellerId: string | null;
 
-  variationGroupKey: string | null;
+  groupId: string;
   variationTheme: string | null;
   hasVariations: boolean;
 
@@ -112,7 +110,6 @@ export interface ProductSavePayload {
   avgRating: number | null;
   reviewsCount: number | null;
   availabilityStatus: AvailabilityStatus;
-  attributesJson: Record<string, unknown> | null;
 }
 
 export interface ProductSnapshotSavePayload {
@@ -128,7 +125,7 @@ export interface ProductSnapshotSavePayload {
 }
 
 export interface ReviewSavePayload {
-  productAsin: string;
+  groupId: string;
   amazonReviewId: string;
   rating: number | null;
   reviewCreatedAt: Date | null;
