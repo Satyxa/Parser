@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AvailabilityStatus {
+  IN_STOCK
+  OUT_OF_STOCK
+  UNKNOWN
+}
+
+enum SellerType {
+  SELLER
+  AUTHOR
+}
+
+model Category {
+  id           BigInt   @id @default(autoincrement())
+  amazonNodeId String?  @unique @db.VarChar(32)
+  name         String   @db.VarChar(255)
+  url          String?  @db.Text
+  parentId     BigInt?
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+
+  parent   Category?         @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[]        @relation("CategoryTree")
+  products ProductCategory[]
+
+  // небольшая таблица, хоть и со всем деревом категорий
+}
+
+model ProductCategory {
+  productAsin String
+  categoryId  BigInt
+  isPrimary   Boolean  @default(false)
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  product  Product  @relation(fields: [productAsin], references: [asin], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  // партиции в зависимости от запроса: категория или асин, что чаще
+
+  @@id([productAsin, categoryId])
+}
+
+model Seller {
+  id          String     @id @db.VarChar(64)
+  type        SellerType
+  label       String?    @db.VarChar(255)
+  url         String?    @db.Text
+  firstSeenAt DateTime   @default(now())
+  lastSeenAt  DateTime   @default(now())
+
+  products  Product[]
+  snapshots SellerSnapshot[]
+
+  @@index([lastSeenAt])
+}
+
+model Product {
+  asin         String  @id @db.VarChar(10)
+  canonicalUrl String? @db.Text
+  title        String  @db.VarChar(500)
+
+  sellerId String? @db.VarChar(64)
+
+  groupId        String  @db.VarChar(64)
+  variationTheme String? @db.VarChar(100)
+  hasVariations  Boolean @default(false)
+
+  priceAmount     Decimal? @db.Decimal(12, 2)
+  listPriceAmount Decimal? @db.Decimal(12, 2)
+  priceMinAmount  Decimal? @db.Decimal(12, 2)
+  priceMaxAmount  Decimal? @db.Decimal(12, 2)
+  couponAmount    Decimal? @db.Decimal(12, 2)
+  currencyCode    String?  @db.Char(3)
+
+  avgRating          Decimal?           @db.Decimal(3, 2)
+  reviewsCount       Int?
+  availabilityStatus AvailabilityStatus @default(UNKNOWN)
+
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  seller     Seller?           @relation(fields: [sellerId], references: [id], onDelete: SetNull)
+  categories ProductCategory[]
+  snapshots  ProductSnapshot[]
+
+  // не определилась с партициями, непонятно какие запросы будут чаще - по группе или по асину
+
+  @@index([sellerId])
+  @@index([groupId])
+  @@index([lastSeenAt])
+}
+
+model ProductSnapshot {
+  productAsin String
+  capturedAt  DateTime @default(now())
+
+  priceAmount     Decimal? @db.Decimal(12, 2)
+  listPriceAmount Decimal? @db.Decimal(12, 2)
+  priceMinAmount  Decimal? @db.Decimal(12, 2)
+  priceMaxAmount  Decimal? @db.Decimal(12, 2)
+  couponAmount    Decimal? @db.Decimal(12, 2)
+  currencyCode    String?  @db.Char(3)
+
+  avgRating          Decimal?           @db.Decimal(3, 2)
+  availabilityStatus AvailabilityStatus @default(UNKNOWN)
+
+  product Product @relation(fields: [productAsin], references: [asin], onDelete: Cascade)
+
+  //partition by asin
+
+  @@id([productAsin, capturedAt])
+}
+
+model Review {
+  amazonReviewId   String    @id @db.VarChar(32)
+  groupId          String    @db.VarChar(64)
+  rating           Int?      @db.SmallInt
+  reviewCreatedAt  DateTime?
+  verifiedPurchase Boolean?
+  helpfulVotes     Int?
+  contentHash      String?   @db.Char(64)
+
+  firstSeenAt   DateTime  @default(now())
+  lastSeenAt    DateTime  @default(now())
+  lastChangedAt DateTime?
+
+  @@index([groupId]) // поставила бы партицию вместо индекса
+  @@index([reviewCreatedAt, lastSeenAt])
+}
+
+model SellerSnapshot {
+  sellerId          String   @db.VarChar(64)
+  capturedAt        DateTime @default(now())
+  productsCount     Int
+  inStockCount      Int
+  avgRating         Decimal? @db.Decimal(4, 2)
+  totalReviewsCount BigInt
+
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  // или вообще не делать партиции если таблица не очень большая будет
+
+  @@id([sellerId, capturedAt]) // можно сделать партицию по айди, если создавать снапшот по триггеру
+  @@index([capturedAt]) // можно сделать партицию по времени, если создавать снапшот не по триггеру
+}
