@@ -30,7 +30,7 @@ model Category {
   children Category[]        @relation("CategoryTree")
   products ProductCategory[]
 
-  // небольшая таблица, хоть и со всем деревом категорий
+  // небольшая таблица, без партиций, возможно индекс можно было бы поставить
 }
 
 model ProductCategory {
@@ -58,6 +58,8 @@ model Seller {
 
   products  Product[]
   snapshots SellerSnapshot[]
+
+  // небольшая таблица, партиции будут лишними, но можно было бы сделать хеш по айди
 
   @@index([lastSeenAt])
 }
